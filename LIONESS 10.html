@@ -1,0 +1,247 @@
+<!doctype html>
+<html lang="pl">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>LIONESS — Rezerwacja Online</title>
+    
+    <script src="https://www.gstatic.com/firebasejs/9.17.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.17.1/firebase-database-compat.js"></script>
+    
+    <style>
+        :root { 
+            --bg:#071529; --panel:#0f2743; --muted:#9fb0d0; --accent:#f0b400; 
+            --green:#2ecc71; --red:#e74c3c; --radius:12px; 
+        }
+        body { margin:0; background:var(--bg); color:#fff; font-family: 'Segoe UI', sans-serif; padding:15px; }
+        .app { max-width:1100px; margin:0 auto; display:grid; grid-template-columns: 1fr 380px; gap:20px; }
+        .panel { background:var(--panel); border-radius:var(--radius); padding:20px; box-shadow: 0 10px 30px rgba(0,0,0,0.5); border: 1px solid rgba(255,255,255,0.05); }
+        .header { display:flex; justify-content:space-between; align-items:center; margin-bottom:15px; }
+        .btn { background:#163a63; border:none; color:#fff; padding:10px 15px; border-radius:8px; cursor:pointer; font-weight: bold; transition: 0.3s; }
+        .btn-cancel { background: var(--red); color: #fff; }
+        
+        /* Сітка календаря */
+        .grid { display:grid; grid-template-columns:repeat(7,1fr); gap:10px; }
+        .cell { 
+            min-height:90px; background:rgba(255,255,255,0.03); border-radius:10px; padding:10px; 
+            cursor:pointer; text-align: center; display: flex; flex-direction: column; align-items: center; justify-content: center; 
+            border: 1px solid transparent; transition: 0.2s;
+        }
+        .cell:hover { background:rgba(255,255,255,0.07); }
+        .cell.selected { border-color: var(--accent); background:rgba(240, 180, 0, 0.1); }
+        .cell.has-data { border-bottom: 4px solid var(--green); }
+        .today-highlight { border: 1px solid var(--accent) !important; box-shadow: inset 0 0 8px var(--accent); }
+        .zap-count { font-size: 11px; color: var(--green); margin-top: 5px; font-weight: bold; }
+
+        /* Список годин */
+        .hour-row { display:flex; justify-content:space-between; align-items:center; padding:15px; background:rgba(255,255,255,0.03); margin-bottom:8px; border-radius:10px; border-left: 5px solid transparent; }
+        .hour-row.reserved { border-left-color: var(--red); background:rgba(231, 76, 60, 0.05); }
+        .hour-row.mine { border-left-color: var(--green); background:rgba(46, 204, 113, 0.1); }
+        .hour-info b { color: var(--accent); font-size: 1.1em; }
+        .status-text { display: block; font-size: 0.85em; margin-top: 2px; }
+
+        /* Форма */
+        input, textarea { width:100%; padding:12px; border-radius:8px; border:none; background:rgba(255,255,255,0.08); color:#fff; margin-bottom:10px; box-sizing: border-box; font-family: inherit; }
+        textarea { height: 80px; resize: none; }
+        label { font-size: 12px; color: var(--muted); margin-bottom: 5px; display: block; }
+
+        @media (max-width:850px) { .app { grid-template-columns: 1fr; } }
+    </style>
+</head>
+<body>
+
+<div class="app">
+    <div class="panel">
+        <div class="header">
+            <button onclick="moveMonth(-1)" class="btn">‹</button>
+            <h2 id="monthTitle" style="margin:0; text-transform: capitalize;"></h2>
+            <button onclick="moveMonth(1)" class="btn">›</button>
+        </div>
+        <div class="grid" id="calendarGrid"></div>
+    </div>
+
+    <div class="panel">
+        <h3 id="selectedDateTitle" style="color:var(--accent)">Wybierz dzień</h3>
+        <div id="hoursList"></div>
+
+        <div id="bookingForm" style="display:none; margin-top:20px; border-top:1px solid #444; padding-top:20px;">
+            <h4 id="formTimeTitle" style="color:var(--accent); margin-bottom:15px;">Nowa Rezerwacja</h4>
+            
+            <input id="fName" placeholder="Imię i Nazwisko">
+            <input id="fPhone" placeholder="Telefon (np. +48...)">
+            <input id="fReg" placeholder="Nr Rejestracyjny Pojazdu">
+            <input id="fAddr" placeholder="Adres (opcjonalnie)">
+            
+            <label>Opisz usługę (np. Sezonowa wymiana opon R16, naprawa opony):</label>
+            <textarea id="fNote" placeholder="Wpisz rozmiar kół lub rodzaj usterki..."></textarea>
+            
+            <button onclick="saveBooking()" class="btn" style="background:var(--green); color:#000; width:100%; padding:15px;">POTWIERDZAM REZERWACJĘ</button>
+            <button onclick="closeForm()" class="btn" style="width:100%; margin-top:10px; background:transparent; color:var(--muted)">Anuluj</button>
+        </div>
+    </div>
+</div>
+
+<script>
+// --- KONFIGURACJA FIREBASE ---
+const firebaseConfig = {
+  apiKey: "AIzaSyAG1ukkW8JC_05JCeZp41EhyoM7VJ2Cl58",
+  authDomain: "kalendar-f5dd9.firebaseapp.com",
+  databaseURL: "https://kalendar-f5dd9-default-rtdb.firebaseio.com",
+  projectId: "kalendar-f5dd9",
+  appId: "1:69464425563:web:137726a05af145bb0c2b7e"
+};
+
+firebase.initializeApp(firebaseConfig);
+const db = firebase.database();
+
+let currentMonth = new Date();
+let selectedDay = null;
+let selectedTime = null;
+let globalData = {};
+const TIMES = ["07:00","09:00","11:00","13:00","15:00","17:00","19:00","21:00"];
+
+// --- POBIERANIE DANYCH ---
+db.ref("bookings").on("value", (snapshot) => {
+    globalData = snapshot.val() || {};
+    renderCalendar();
+    if(selectedDay) renderHours();
+});
+
+function renderCalendar() {
+    const grid = document.getElementById('calendarGrid');
+    grid.innerHTML = '';
+    const y = currentMonth.getFullYear(), m = currentMonth.getMonth();
+    const now = new Date();
+    const todayStr = `${y}-${String(m+1).padStart(2,'0')}-${String(now.getDate()).padStart(2,'0')}`;
+    
+    document.getElementById('monthTitle').textContent = new Date(y, m).toLocaleString('pl-PL', {month:'long', year:'numeric'});
+    const startDay = (new Date(y, m, 1).getDay() + 6) % 7;
+    for(let i=0; i<startDay; i++) grid.appendChild(document.createElement('div'));
+
+    for(let d=1; d<=new Date(y, m+1, 0).getDate(); d++) {
+        const dateStr = `${y}-${String(m+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
+        const dayEntriesCount = globalData[dateStr] ? Object.keys(globalData[dateStr]).length : 0;
+        
+        const cell = document.createElement('div');
+        cell.className = `cell ${selectedDay === dateStr ? 'selected' : ''} ${dateStr === todayStr ? 'today-highlight' : ''} ${dayEntriesCount > 0 ? 'has-data' : ''}`;
+        
+        cell.innerHTML = `
+            <b style="font-size:1.1em">${d}</b>
+            ${dayEntriesCount > 0 ? `<div class="zap-count">${dayEntriesCount} zap.</div>` : ''}
+        `;
+        
+        cell.onclick = () => { selectedDay = dateStr; renderCalendar(); renderHours(); closeForm(); };
+        grid.appendChild(cell);
+    }
+}
+
+function renderHours() {
+    const list = document.getElementById('hoursList');
+    list.innerHTML = '';
+    document.getElementById('selectedDateTitle').textContent = "Wybrana data: " + selectedDay;
+    const dayData = globalData[selectedDay] || {};
+    
+    // Pobieramy ID rezerwacji z pamięci przeglądarki (localStorage)
+    const myBookings = JSON.parse(localStorage.getItem('my_lioness_reservations') || '{}');
+
+    TIMES.forEach(t => {
+        const res = dayData[t];
+        const isReserved = !!res;
+        const isMyBooking = isReserved && myBookings[selectedDay] === t;
+
+        const row = document.createElement('div');
+        row.className = `hour-row ${isReserved ? 'reserved' : ''} ${isMyBooking ? 'mine' : ''}`;
+        
+        let actionBtn = '';
+        if (!isReserved) {
+            actionBtn = `<button class="btn" onclick="openForm('${t}')">REZERWUJ</button>`;
+        } else if (isMyBooking) {
+            actionBtn = `<button class="btn btn-cancel" onclick="cancelMyBooking('${t}')">ANULUJ</button>`;
+        }
+
+        row.innerHTML = `
+            <div class="hour-info">
+                <b>${t}</b>
+                <span class="status-text" style="color:${isMyBooking ? 'var(--green)' : (isReserved ? 'var(--red)' : 'var(--green)')}">
+                    ${isMyBooking ? '● TWOJA REZERWACJA' : (isReserved ? '● Termin zajęty' : '○ Wolny termin')}
+                </span>
+            </div>
+            ${actionBtn}
+        `;
+        list.appendChild(row);
+    });
+}
+
+function openForm(t) {
+    selectedTime = t;
+    document.getElementById('bookingForm').style.display = 'block';
+    document.getElementById('formTimeTitle').textContent = "Rezerwacja na: " + t;
+    document.getElementById('bookingForm').scrollIntoView({ behavior: 'smooth' });
+}
+
+async function saveBooking() {
+    const name = document.getElementById('fName').value.trim();
+    const phone = document.getElementById('fPhone').value.trim();
+    
+    if(!name || !phone) return alert("Proszę wpisać Imię i Numer telefonu!");
+
+    const entry = {
+        name, 
+        phone,
+        reg: document.getElementById('fReg').value.trim(),
+        addr: document.getElementById('fAddr').value.trim(),
+        note: document.getElementById('fNote').value.trim(),
+        timestamp: new Date().toISOString()
+    };
+
+    try {
+        await db.ref(`bookings/${selectedDay}/${selectedTime}`).set(entry);
+        
+        // Zapisujemy informację lokalnie, aby klient mógł anulować
+        const myBookings = JSON.parse(localStorage.getItem('my_lioness_reservations') || '{}');
+        myBookings[selectedDay] = selectedTime;
+        localStorage.setItem('my_lioness_reservations', JSON.stringify(myBookings));
+
+        alert("Dziękujemy! Rezerwacja została zapisana.");
+        closeForm();
+    } catch (e) {
+        alert("Błąd zapisu. Spróbuj ponownie.");
+    }
+}
+
+async function cancelMyBooking(t) {
+    if(confirm("Czy na pewno chcesz anulować swoją rezerwację na godzinę " + t + "?")) {
+        try {
+            await db.ref(`bookings/${selectedDay}/${t}`).remove();
+            
+            // Czyścimy lokalną pamięć
+            const myBookings = JSON.parse(localStorage.getItem('my_lioness_reservations') || '{}');
+            delete myBookings[selectedDay];
+            localStorage.setItem('my_lioness_reservations', JSON.stringify(myBookings));
+            
+            alert("Rezerwacja została anulowana.");
+        } catch (e) {
+            alert("Błąd połączenia.");
+        }
+    }
+}
+
+function closeForm() { 
+    document.getElementById('bookingForm').style.display = 'none';
+    document.getElementById('fName').value = '';
+    document.getElementById('fPhone').value = '';
+    document.getElementById('fReg').value = '';
+    document.getElementById('fNote').value = '';
+}
+
+function moveMonth(n) { 
+    currentMonth.setMonth(currentMonth.getMonth() + n); 
+    renderCalendar(); 
+    closeForm();
+}
+
+renderCalendar();
+</script>
+
+</body>
+</html>
